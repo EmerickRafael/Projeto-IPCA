@@ -1,0 +1,423 @@
+---
+title: "Projeto IPCA - Grupo 2"
+author: "Iann Soffried, Lucas Mendes, Rafael Emerick"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: united
+---
+# Objetivo
+
+Este projeto tem como objetivo analisar a inflação medida pelo IPCA a partir de diferentes ângulos. A proposta envolve entender a variação entre preços livres e administrados, observar o quanto a inflação está espalhada pela economia por meio do índice de difusão, identificar tendências de longo prazo e construir uma versão dessazonalizada do índice para focar nos movimentos mais estruturais.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(lubridate)
+library(rbcb)
+library(sidrar)
+library(scales)
+library(readr)
+library(tidyr)
+library(ipeadatar)
+library(quantmod)
+library(rb3)
+```
+
+# Análise dos Preços Livres e Administrados
+
+```{r precos-livres-administrados}
+
+# Importar dados IPCA
+ipca_geral <- get_series(433, start_date = "2020-01-01", end_date = "2025-03-01") %>% 
+  rename(geral = "433")
+
+ipca_livres <- get_series(11427, start_date = "2020-01-01", end_date = "2025-03-01") %>%
+  rename(livres = "11427")
+
+ipca_adm <- get_series(11428, start_date = "2020-01-01", end_date = "2025-03-01") %>%
+  rename(administrados = "11428")
+
+# Juntar dados
+dados <- ipca_geral %>%
+  left_join(ipca_livres, by = "date") %>%
+  left_join(ipca_adm, by = "date") %>%
+  rename(data = date)
+
+# Gráfico Preços Livres, Administrados e Geral
+cores_ipca <- c(
+  "livres" = "#1B4F72",
+  "administrados" = "#C0392B",
+  "geral" = "#7B7D7D"
+)
+
+dados %>%
+  pivot_longer(cols = c(livres, administrados, geral), names_to = "grupo", values_to = "valor") %>%
+  ggplot(aes(x = data, y = valor, color = grupo)) +
+  geom_line(size = 1.2) +
+  facet_wrap(~grupo, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = cores_ipca) +
+  labs(title = "Variação Mensal do IPCA por Grupo", x = "Data", y = "Variação (%)") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom")
+```
+
+> **Análise:** A inflação de preços administrados apresenta maior estabilidade e movimentos abruptos concentrados, refletindo ajustes pontuais em tarifas reguladas. Já os preços livres mostram maior volatilidade, acompanhando mais de perto a dinâmica do IPCA geral. A combinação das duas categorias explica o comportamento composto do índice.
+
+```{r correlacao-ipca}
+# Gráfico Correlação IPCA Livres vs Geral
+ggplot(dados, aes(x = livres, y = geral)) +
+  geom_point(color = "#1B4F72", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "#C0392B", size = 1.2) +
+  labs(title = "Correlação: IPCA Livres vs Geral", x = "Livres (%)", y = "Geral (%)") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+> **Análise:** A dispersão dos pontos revela uma correlação linear positiva forte entre os preços livres e o IPCA geral. Isso sugere que os preços livres são o principal motor da inflação agregada, o que é esperado dado seu peso na cesta de consumo.
+
+```{r modelo-regressao, echo=TRUE, results='hide', message=FALSE, warning=FALSE}
+modelo <- lm(geral ~ livres + administrados, data = dados)
+summary(modelo)
+plot(modelo, which = 1)
+
+```
+
+> **Análise:** O gráfico de resíduos mostra dispersão relativamente homogênea ao redor de zero, sem padrões sistemáticos evidentes. Isso indica que o modelo linear com preços livres e administrados como variáveis explicativas consegue capturar razoavelmente bem o comportamento do IPCA geral.
+
+```{r ipca-ouro}
+ouro <- read.csv("C:\\Users\\aemer\\OneDrive\\Documentos\\Faculdade\\Econdata Projetos\\Projeto IPCA\\ouro_oz1d_simulado_2020_2025.csv") %>% 
+  mutate(data = as.Date(data))
+
+ouro_mensal <- ouro %>% 
+  mutate(mes = floor_date(data, "month")) %>% 
+  group_by(mes) %>% 
+  summarise(preco_ouro = mean(oz1d_simulado, na.rm = TRUE), .groups = "drop")
+
+# IPCA e Ouro
+ipca_ouro <- dados %>% 
+  mutate(mes = as.Date(data)) %>% 
+  left_join(ouro_mensal, by = "mes")
+
+cores_ouro <- c("IPCA Geral" = "#1B4F72", "Ouro" = "#F4A03E")
+
+ggplot(ipca_ouro, aes(x = mes)) +
+  geom_line(aes(y = geral, color = "IPCA Geral"), size = 1.2) +
+  geom_line(aes(y = preco_ouro / 150, color = "Ouro"), size = 1.2) +
+  scale_y_continuous(
+    name = "IPCA Geral (%)",
+    sec.axis = sec_axis(~ . * 150, name = "Preço do Ouro (R$)")
+  ) +
+  scale_color_manual(values = cores_ouro) +
+  labs(title = "IPCA Geral vs Preço do Ouro (Mensal)", x = "Data", color = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom")
+```
+
+> **Análise:** O gráfico mostra que em períodos de aceleração inflacionária, há elevação do preço do ouro, o que sugere que investidores recorrem a ativos reais como proteção contra a perda de poder de compra. A correlação não é perfeita, mas o ouro tende a responder a expectativas inflacionárias elevadas.
+
+# Análise do Índice de Difusão do IPCA
+
+```{r indice-difusao}
+
+# Coletar variação mensal por subitem do IPCA (Tabela 1419)
+ipca_subitens <- get_sidra(api = "/t/1419/n1/all/v/63/p/all/c315/all/d/v63%202") %>%
+  select(mes = `Mês (Código)`,
+         subitem = `Geral, grupo, subgrupo, item e subitem`,
+         variacao = Valor) %>%
+  filter(!is.na(variacao)) %>%
+  mutate(data = ymd(paste0(mes, "01")))
+
+# Cálculo do índice de difusão
+indice_difusao <- ipca_subitens %>%
+  group_by(data) %>%
+  summarise(
+    total_subitens = n(),
+    subitens_positivos = sum(variacao > 0),
+    indice_difusao = round((subitens_positivos / total_subitens) * 100, 2)
+  )
+
+# Coletar série de desemprego mensal
+desemprego <- get_series(24369, start_date = "2012-01-01", end_date = Sys.Date()) %>%
+  rename(data = date, desemprego = '24369')
+
+# Unir difusão do IPCA e desemprego
+painel_macro <- left_join(indice_difusao, desemprego, by = "data")
+
+# Calcular o fator de escala
+escala <- max(painel_macro$indice_difusao, na.rm = TRUE) / max(painel_macro$desemprego, na.rm = TRUE)
+
+# Gráfico IPCA e Desemprego
+ggplot(painel_macro, aes(x = data)) +
+  geom_line(aes(y = indice_difusao), color = "#1B4F72", size = 1.2) +
+  geom_line(aes(y = desemprego * escala), color = "#C0392B", size = 1.2) +
+  scale_y_continuous(
+    name = "Índice de Difusão (%)",
+    sec.axis = sec_axis(~ . / escala, name = "Desemprego (%)")
+  ) +
+  labs(
+    title = "Índice de Difusão do IPCA vs Taxa de Desemprego",
+    x = "Data"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+> **Análise:** Em diversos momentos, observa-se uma relação inversa entre a difusão da inflação e o desemprego, alinhando-se à lógica da Curva de Phillips. Períodos de desemprego mais baixo coincidem com maior disseminação da inflação, sugerindo pressões de demanda mais fortes.
+
+# Tendência da Série IPCA
+```{r Tendencia IPCA}
+# Baixando as séries dos grupos do IPCA do Banco Central
+IPCA = get_series(c(IPCA = 433), start_date = "2020-01-01", end_date = "2025-03-01")
+
+IPCA_Alimentação = get_series(c(IPCA_Alimentação = 1635),
+                              start_date = "2020-01-01",
+                              end_date = "2025-03-01")
+
+IPCA_Habitação = get_series(c(IPCA_Habitação = 1636),
+                            start_date = "2020-01-01",
+                            end_date = "2025-03-01")
+
+IPCA_Residência = get_series(c(IPCA_Residência = 1637),
+                             start_date = "2020-01-01",
+                             end_date = "2025-03-01")
+
+IPCA_Vestuário = get_series(c(IPCA_Vestuário = 1638),
+                            start_date = "2020-01-01",
+                            end_date = "2025-03-01")
+
+IPCA_Transportes = get_series(c(IPCA_Transportes = 1639),
+                              start_date = "2020-01-01",
+                              end_date = "2025-03-01")
+
+IPCA_Comunicação = get_series(c(IPCA_Comunicação = 1640),
+                              start_date = "2020-01-01",
+                              end_date = "2025-03-01")
+
+IPCA_Saúde = get_series(c(IPCA_Saúde = 1641),
+                        start_date = "2020-01-01",
+                        end_date = "2025-03-01")
+
+IPCA_Despesas = get_series(c(IPCA_Despesas = 1642),
+                           start_date = "2020-01-01",
+                           end_date = "2025-03-01")
+
+IPCA_Educação = get_series(c(IPCA_Educação = 1643),
+                           start_date = "2020-01-01",
+                           end_date = "2025-03-01")
+
+# Calculando a variação acumulada
+
+IPCA = mutate(IPCA, VarAcumulada = 100 * (cumprod(1 + IPCA / 100) - 1))
+
+IPCA_Alimentação = mutate(IPCA_Alimentação, VarAcumulada = 100 * (cumprod(1 +
+                                                                            IPCA_Alimentação / 100) - 1))
+
+IPCA_Habitação = mutate(IPCA_Habitação, VarAcumulada = 100 * (cumprod(1 +
+                                                                        IPCA_Habitação / 100) - 1))
+
+IPCA_Comunicação = mutate(IPCA_Comunicação, VarAcumulada = 100 * (cumprod(1 +
+                                                                            IPCA_Comunicação / 100) - 1))
+
+IPCA_Despesas = mutate(IPCA_Despesas, VarAcumulada = 100 * (cumprod(1 +
+                                                                      IPCA_Despesas / 100) - 1))
+
+IPCA_Educação = mutate(IPCA_Educação, VarAcumulada = 100 * (cumprod(1 +
+                                                                      IPCA_Educação / 100) - 1))
+
+IPCA_Residência = mutate(IPCA_Residência, VarAcumulada = 100 * (cumprod(1 +
+                                                                          IPCA_Residência / 100) - 1))
+
+IPCA_Saúde = mutate(IPCA_Saúde, VarAcumulada = 100 * (cumprod(1 + IPCA_Saúde /
+                                                                100) - 1))
+
+IPCA_Transportes = mutate(IPCA_Transportes, VarAcumulada = 100 * (cumprod(1 +
+                                                                            IPCA_Transportes / 100) - 1))
+
+IPCA_Vestuário = mutate(IPCA_Vestuário, VarAcumulada = 100 * (cumprod(1 +
+                                                                        IPCA_Vestuário / 100) - 1))
+
+# Anotando os pesos dos grupos no IPCA, a partir de dados do IBGE de Janeiro de 2018
+
+# Alimentação = 18,99%
+# Habitação = 15,16%
+# Artigos de residência = 4,02%
+# Vestuário = 4,8%
+# Transportes = 20,84%
+# Saude = 13,46%
+# Despesas = 10,6%
+# Educação = 5,95%
+# Comunicação = 6,19%
+
+# Calculando o impacto de cada grupo no IPCA acumulado
+
+acum_ali = tail(IPCA_Alimentação$VarAcumulada, 1)
+acum_hab = tail(IPCA_Habitação$VarAcumulada, 1)
+acum_res = tail(IPCA_Residência$VarAcumulada, 1)
+acum_ves = tail(IPCA_Vestuário$VarAcumulada, 1)
+acum_tra = tail(IPCA_Transportes$VarAcumulada, 1)
+acum_sau = tail(IPCA_Saúde$VarAcumulada, 1)
+acum_des = tail(IPCA_Despesas$VarAcumulada, 1)
+acum_edu = tail(IPCA_Educação$VarAcumulada, 1)
+acum_com = tail(IPCA_Comunicação$VarAcumulada, 1)
+
+pesos = c(0.1899,
+          0.1516,
+          0.0402,
+          0.0480,
+          0.2084,
+          0.1346,
+          0.1060,
+          0.0595,
+          0.0619)
+variacoes = c(
+  acum_ali,
+  acum_hab,
+  acum_res,
+  acum_ves,
+  acum_tra,
+  acum_sau,
+  acum_des,
+  acum_edu,
+  acum_com
+)
+grupos = c(
+  "Alimentação",
+  "Habitação",
+  "Residência",
+  "Vestuário",
+  "Transportes",
+  "Saúde",
+  "Despesas",
+  "Educação",
+  "Comunicação"
+)
+
+df_impacto = data.frame(
+  Grupo = grupos,
+  Peso = pesos,
+  Variacao_Acumulada = variacoes,
+  Impacto = pesos * variacoes
+)
+
+# Analise de impactos
+
+ggplot(df_impacto, aes(x = reorder(Grupo, Impacto), y = Impacto)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(title = "Impacto de cada grupo no IPCA acumulado (2020–2025)", x = "Grupo", y = "Impacto (p.p.)") +
+  theme_minimal()
+```
+
+> **Análise:** Apesar de "Alimentação" apresentar tanto o maior impacto acumulado quanto alta volatilidade, a contribuição de cada grupo ao IPCA depende também do peso que possui na estrutura do índice. Por exemplo, grupos como "Comunicação", mesmo com baixa variação acumulada, também têm impacto reduzido devido à menor participação na composição do IPCA. Assim, maior variação não implica necessariamente maior influência no índice final.
+
+```{r Desvio Padrao}
+# calcular desvio padrão da variação acumulada
+
+df_desvios <- data.frame(
+  Grupo = c(
+    "Alimentação",
+    "Habitação",
+    "Residência",
+    "Vestuário",
+    "Transportes",
+    "Comunicação",
+    "Saúde",
+    "Despesas",
+    "Educação"
+  ),
+  Desvio_Padrao = c(
+    sd(IPCA_Alimentação$VarAcumulada, na.rm = TRUE),
+    sd(IPCA_Habitação$VarAcumulada, na.rm = TRUE),
+    sd(IPCA_Residência$VarAcumulada, na.rm = TRUE),
+    sd(IPCA_Vestuário$VarAcumulada, na.rm = TRUE),
+    sd(IPCA_Transportes$VarAcumulada, na.rm = TRUE),
+    sd(IPCA_Comunicação$VarAcumulada, na.rm = TRUE),
+    sd(IPCA_Saúde$VarAcumulada, na.rm = TRUE),
+    sd(IPCA_Despesas$VarAcumulada, na.rm = TRUE),
+    sd(IPCA_Educação$VarAcumulada, na.rm = TRUE)
+  )
+)
+
+# Criar o gráfico de barras dos desvios padrão
+
+ggplot(df_desvios, aes(x = reorder(Grupo, Desvio_Padrao), y = Desvio_Padrao)) +
+  geom_bar(stat = "identity", fill = "#0072B2") +
+  coord_flip() +
+  labs(title = "Desvio Padrão da Variação Acumulada por Grupo do IPCA", x = "Grupo", y = "Desvio Padrão (%)") +
+  theme_minimal()
+```
+
+> **Análise:** O gráfico mostra que o grupo "Comunicação" apresentou o menor desvio-padrão, indicando maior consistência e estabilidade nas variações acumuladas de preços ao longo do tempo. Já "Alimentação" e "Vestuário" tiveram os maiores desvios, refletindo maior volatilidade. Isso sugere que certos setores são mais suscetíveis a choques específicos ou variações sazonais, enquanto outros mantêm comportamento mais previsível.
+
+# Dessasonalização da Série IPCA
+
+```{r dessazonalizacao}
+# Paleta personalizada para padronização
+cores_dessazonalizacao <- c("ajustada" = "#1B4F72", "original" = "#7B7D7D")
+
+# Baixando a série IPCA do Banco Central
+IPCA = get_series(c(IPCA = 433),
+                  start_date = "2020-01-01",
+                  end_date = "2025-03-01",
+                  as = "ts")
+
+# Decompondo a série temporal
+dec = decompose(IPCA)
+
+# Plotando a decomposição
+autoplot(dec) +
+  ggtitle("Decomposição da Série IPCA (2020-2025)") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+> **Análise:** A decomposição da série IPCA mostra que a tendência é o principal componente, enquanto a sazonalidade exerce influência reduzida. O comportamento da inflação ao longo do período reflete principalmente movimentos estruturais e mudanças econômicas reais.
+
+```{r dessazonalizada}
+# Dessazonalizando a série
+sas = seasadj(dec)
+
+# Plot da série dessazonalizada
+autoplot(sas) +
+  ggtitle("Série IPCA Dessazonalizada") +
+  ylab("") +
+  xlab("Ano") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+> **Análise:** A série dessazonalizada evidencia a trajetória real da inflação, suavizando as oscilações mensais e permitindo uma leitura mais precisa dos movimentos de médio prazo da economia.
+
+```{r comparacao-series}
+# Plotando série original vs dessazonalizada com legenda correta
+autoplot(sas, series = "ajustada", linewidth = 1.2) +
+  autolayer(IPCA, series = "original", linewidth = 0.8) +
+  scale_color_manual(values = cores_dessazonalizacao) +
+  theme_minimal(base_size = 13) +
+  labs(x = "Ano", y = "", title = "Série IPCA Original vs Dessazonalizada") +
+  theme(plot.title = element_text(hjust = 0.5),
+      legend.position = "bottom")
+
+```
+
+> **Análise:** A comparação entre as séries mostra que a dessazonalização preserva a tendência principal da inflação. As diferenças visíveis em picos e vales são pequenas, indicando que o impacto da sazonalidade é moderado, com a maior parte da variação associada a fatores econômicos estruturais.
+
+
+# Conclusão
+
+O projeto permitiu uma compreensão ampla da dinâmica recente da inflação brasileira, com base em diferentes abordagens sobre o IPCA. A partir da análise entre preços livres e administrados, observou-se que os preços livres desempenham papel central na formação do índice geral, apresentando maior volatilidade e sensibilidade à conjuntura econômica, enquanto os preços administrados se mostraram mais estáveis e sujeitos a ajustes pontuais.
+
+Ao investigar o índice de difusão, foi possível perceber momentos em que a inflação se disseminou de forma mais ampla entre os itens da cesta, especialmente em contextos de recuperação econômica e queda do desemprego. Esse comportamento reforça a relação entre pressão inflacionária e atividade econômica, alinhando-se à lógica da Curva de Phillips.
+
+A dessazonalização da série IPCA trouxe maior clareza à tendência de fundo da inflação, ao remover variações temporárias recorrentes. A análise revelou que os movimentos estruturais predominam sobre os efeitos sazonais, tornando a série ajustada uma ferramenta valiosa para o monitoramento de médio e longo prazo.
+
+Por fim, a avaliação do impacto e da variabilidade dos grupos que compõem o IPCA mostrou que a inflação recente foi puxada principalmente por alimentação e transportes, tanto em termos de peso quanto de instabilidade. Já o grupo de comunicação destacou-se pela consistência e baixa contribuição para o índice.
+
+De forma integrada, os resultados evidenciam a importância de se analisar não apenas o valor agregado da inflação, mas também sua composição, dispersão e comportamento ao longo do tempo. Essa leitura mais profunda do IPCA contribui para uma interpretação mais precisa dos ciclos inflacionários e fornece subsídios relevantes para decisões econômicas e de política monetária.
